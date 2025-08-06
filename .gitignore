@@ -47,6 +47,7 @@ webpack-stats.json
 # General
 /{{project_name}}-venv/
 /venv/
+.venv/
 /env/
 /output/
 /cache/
