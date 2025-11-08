@@ -32,7 +32,6 @@ from langchain_core.runnables import (
     RunnableBranch,
 )
 from langchain_core.tools import BaseTool
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel
@@ -43,6 +42,7 @@ from django_ai_assistant.exceptions import (
 )
 from django_ai_assistant.helpers.django_messages import save_django_messages
 from django_ai_assistant.langchain.tools import tool as tool_decorator
+from django_ai_assistant.providers import get_provider
 
 
 class AIAssistant(abc.ABC):  # noqa: F821
@@ -68,8 +68,15 @@ class AIAssistant(abc.ABC):  # noqa: F821
     """Instructions for the AI assistant knowing what to do. This is the LLM system prompt."""
     model: str
     """LLM model name to use for the assistant.\n
-    Should be a valid model name from OpenAI, because the default `get_llm` method uses OpenAI.\n
-    `get_llm` can be overridden to use a different LLM implementation.
+    Should be a valid model name for the provider specified in the `provider` attribute.\n
+    Examples: "gpt-4o-mini" (OpenAI), "claude-3-5-sonnet-20241022" (Anthropic), etc.
+    """
+    provider: str = "openai"
+    """LLM provider to use for the assistant.\n
+    Defaults to `"openai"`.\n
+    Available providers: "openai", "anthropic", "groq", "google", "cohere", "ollama".\n
+    Custom providers can be registered using `django_ai_assistant.providers.register_provider`.\n
+    The provider's LangChain integration must be installed (e.g., `langchain-openai`, `langchain-anthropic`).
     """
     temperature: float | None = 1.0
     """Temperature to use for the assistant LLM model.\n
@@ -265,30 +272,38 @@ class AIAssistant(abc.ABC):  # noqa: F821
         """
         return {}
 
+    def get_provider(self) -> str:
+        """Get the LLM provider name for the assistant.
+        By default, this is the `provider` attribute, which defaults to "openai".\n
+        Used by the `get_llm` method to create the LLM instance.\n
+        Override the `provider` attribute or this method to use a different LLM provider.
+
+        Returns:
+            str: The LLM provider name for the assistant.
+        """
+        return self.provider
+
     def get_llm(self) -> BaseChatModel:
         """Get the LangChain LLM instance for the assistant.
-        By default, this uses the OpenAI implementation.\n
-        `get_model`, `get_temperature`, and `get_model_kwargs` are used to create the LLM instance.\n
-        Override this method to use a different LLM implementation.
+        By default, this uses the provider specified in the `provider` attribute.\n
+        `get_provider`, `get_model`, `get_temperature`, and `get_model_kwargs` are used
+        to create the LLM instance.\n
+        Override this method to use a completely custom LLM implementation.
 
         Returns:
             BaseChatModel: The LLM instance for the assistant.
         """
+        provider_name = self.get_provider()
+        provider_config = get_provider(provider_name)
         model = self.get_model()
         temperature = self.get_temperature()
         model_kwargs = self.get_model_kwargs()
 
-        if temperature is not None:
-            return ChatOpenAI(
-                model=model,
-                temperature=temperature,
-                model_kwargs=model_kwargs,
-            )
-        else:
-            return ChatOpenAI(
-                model=model,
-                model_kwargs=model_kwargs,
-            )
+        return provider_config.create_llm(
+            model=model,
+            temperature=temperature,
+            **model_kwargs,
+        )
 
     def get_structured_output_llm(self) -> Runnable:
         """Get the LLM model to use for the structured output.
@@ -300,13 +315,12 @@ class AIAssistant(abc.ABC):  # noqa: F821
             raise ValueError("structured_output is not defined")
 
         llm = self.get_llm()
+        provider_name = self.get_provider()
+        provider_config = get_provider(provider_name)
 
-        method = "json_mode"
-        if isinstance(llm, ChatOpenAI):
-            # When using ChatOpenAI, it's better to use json_schema method
-            # because it enables strict mode.
-            # https://platform.openai.com/docs/guides/structured-outputs
-            method = "json_schema"
+        # Use json_schema method for providers that support it (like OpenAI),
+        # otherwise use json_mode
+        method = "json_schema" if provider_config.supports_json_schema else "json_mode"
 
         return llm.with_structured_output(self.structured_output, method=method)
 
